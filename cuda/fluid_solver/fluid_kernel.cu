@@ -3,139 +3,149 @@
 
 #define EMPTY 0
 #define WATER 1
-#define WALL 2
+#define WALL  2
 
 extern "C" {
 
+// =====================================================
+// INIT GRID
+// =====================================================
+
 __global__ void initGridKernel(int* grid, int w, int h) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < w*h) {
-        grid[idx] = EMPTY;
-        // Walls around
-        int x = idx % w;
-        int y = idx / w;
-        if (y == h - 1) grid[idx] = WALL;
-        if (x == 0 || x == w - 1) grid[idx] = WALL;
-        if (y == 0) grid[idx] = WALL;
-    }
+    if (idx >= w * h) return;
+
+    int x = idx % w;
+    int y = idx / w;
+
+    grid[idx] = EMPTY;
+
+    if (y == 0 || y == h - 1 || x == 0 || x == w - 1)
+        grid[idx] = WALL;
 }
 
-__device__ bool tryMove(int* grid, int srcIdx, int dstIdx) {
-    if (atomicCAS(&grid[dstIdx], EMPTY, WATER) == EMPTY) {
-        grid[srcIdx] = EMPTY;
+__device__ __forceinline__ bool tryMove(int* grid, int src, int dst) {
+    if (atomicCAS(&grid[dst], EMPTY, WATER) == EMPTY) {
+        grid[src] = EMPTY;
         return true;
     }
     return false;
 }
 
-// 1. GRAVITY KERNEL: Strictly vertical movement
+// =====================================================
+// 1. GRAVITY KERNEL (STRICT FREE FALL)
+// =====================================================
+
 __global__ void updateGravityKernel(int* grid, int w, int h, int frame) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= w*h) return;
+    if (idx >= w * h) return;
 
-    // Only process Water
-    if (grid[idx] == WATER) {
-        int y = idx / w;
-        if (y >= h - 1) return; // Bottom
+    if (grid[idx] != WATER) return;
 
-        int down = idx + w;
-        
-        // Try falling straight down
-        tryMove(grid, idx, down);
-    }
+    int y = idx / w;
+    if (y >= h - 1) return;
+
+    int down = idx + w;
+    tryMove(grid, idx, down);
 }
 
-// 2. SETTLE KERNEL: Diagonal and Horizontal movement
-// Crucial: Only runs if the particle is supported from below to prevent mid-air jitter
+// =====================================================
+// 2. SETTLE / FLOW KERNEL (OPTIMIZED)
+// =====================================================
+
 __global__ void updateSettleKernel(int* grid, int w, int h, int frame) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= w*h) return;
+    if (idx >= w * h) return;
+    if (grid[idx] != WATER) return;
 
-    if (grid[idx] == WATER) {
-        int x = idx % w;
-        int y = idx / w;
-        if (y >= h - 1) return;
+    int x = idx % w;
+    int y = idx / w;
+    if (y >= h - 1) return;
 
-        int down = idx + w;
-        int cellBelow = grid[down];
+    int down = idx + w;
+    int below = grid[down];
+    int belowBelow = (y + 2 < h) ? grid[idx + 2 * w] : WALL;
 
-        // LINEAR FALL FIX:
-        // If the space below is EMPTY, we are falling. 
-        // Do NOT move sideways or diagonal. Wait for Gravity kernel to handle us next frame.
-        if (cellBelow == EMPTY) return;
+    // ✅ TRUE FREE-FALL DETECTION (O(1))
+    bool stableSupport = (below == WALL) || (below == WATER && belowBelow != EMPTY);
+    if (!stableSupport) return;
 
-        // If we are here, 'down' is blocked (WATER or WALL). We need to flow.
-        
-        int downLeft = idx + w - 1;
-        int downRight = idx + w + 1;
-        int left = idx - 1;
-        int right = idx + 1;
+    int downLeft  = idx + w - 1;
+    int downRight = idx + w + 1;
 
-        // Pseudo-random direction to avoid bias
-        bool tryLeftFirst = (frame & 1) ^ (x & 1) ^ (y & 1); 
+    bool tryLeftFirst = (frame ^ x ^ y) & 1;
 
-        // 1. Try Diagonals (Flowing down slopes)
-        if (tryLeftFirst) {
-            if (x > 0 && tryMove(grid, idx, downLeft)) return;
-            if (x < w - 1 && tryMove(grid, idx, downRight)) return;
-        } else {
-            if (x < w - 1 && tryMove(grid, idx, downRight)) return;
-            if (x > 0 && tryMove(grid, idx, downLeft)) return;
-        }
+    // ✅ DIAGONAL FLOW (SLOPE BEHAVIOR)
+    if (tryLeftFirst) {
+        if (x > 0     && tryMove(grid, idx, downLeft))  return;
+        if (x < w - 1 && tryMove(grid, idx, downRight)) return;
+    } else {
+        if (x < w - 1 && tryMove(grid, idx, downRight)) return;
+        if (x > 0     && tryMove(grid, idx, downLeft))  return;
+    }
 
-        // 2. Try Horizontal (Spreading / Leveling)
-        if (tryLeftFirst) {
-             if (x > 0 && tryMove(grid, idx, left)) return;
-             if (x < w - 1 && tryMove(grid, idx, right)) return;
-        } else {
-             if (x < w - 1 && tryMove(grid, idx, right)) return;
-             if (x > 0 && tryMove(grid, idx, left)) return;
-        }
+    // ✅ FAST PRESSURE-BASED HORIZONTAL FLOW
+    int left  = idx - 1;
+    int right = idx + 1;
+
+    bool leftEmpty  = (x > 0)   && grid[left]  == EMPTY;
+    bool rightEmpty = (x < w-1) && grid[right] == EMPTY;
+
+    if (tryLeftFirst) {
+        if (leftEmpty  && tryMove(grid, idx, left))  return;
+        if (rightEmpty && tryMove(grid, idx, right)) return;
+    } else {
+        if (rightEmpty && tryMove(grid, idx, right)) return;
+        if (leftEmpty  && tryMove(grid, idx, left))  return;
     }
 }
+
+// =====================================================
+// RENDER KERNEL
+// =====================================================
 
 __global__ void renderGridKernel(int* grid, unsigned char* fb, int w, int h) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= w*h) return;
+    if (idx >= w * h) return;
 
     int cell = grid[idx];
-    int pixelIdx = idx * 4;
+    int p = idx * 4;
 
-    unsigned char r=0, g=0, b=0;
+    unsigned char r = 10, g = 10, b = 10;
+
     if (cell == WATER) {
-        // More realistic water color (Deep Blue)
-        r=20; g=100; b=220;
-        
-        // Add some shimmer based on index and depth (optional visual polish)
-        if ((idx * 17 + blockIdx.x) % 31 < 5) {
-             r += 20; g += 30; b += 30;
-        }
-    } else if (cell == WALL) {
-        r=100; g=100; b=100;
-    } else {
-        r=10; g=10; b=10;
+        r = 20; g = 50; b = 220;
+    }
+    else if (cell == WALL) {
+        r = 100; g = 100; b = 100;
     }
 
-    fb[pixelIdx+0] = r;
-    fb[pixelIdx+1] = g;
-    fb[pixelIdx+2] = b;
-    fb[pixelIdx+3] = 255;
+    fb[p + 0] = r;
+    fb[p + 1] = g;
+    fb[p + 2] = b;
+    fb[p + 3] = 255;
 }
 
-__global__ void paintCircleKernel(int* grid, int w, int h, int cx, int cy, int r, int type) {
+// =====================================================
+// PAINT KERNELS
+// =====================================================
+
+__global__ void paintCircleKernel(int* grid, int w, int h,
+                                  int cx, int cy, int r, int type) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= w*h) return;
+    if (idx >= w * h) return;
+
     int x = idx % w;
     int y = idx / w;
+
     int dx = x - cx;
     int dy = y - cy;
-    if (dx*dx + dy*dy <= r*r) {
+
+    if (dx * dx + dy * dy <= r * r) {
         if (grid[idx] != WALL) {
-            // Stability check: 
-            // If painting WATER, only paint on EMPTY.
-            // If painting WALL/EMPTY (Eraser), overwrite anything.
             if (type == WATER) {
-                if (grid[idx] == EMPTY) grid[idx] = WATER;
+                if (grid[idx] == EMPTY)
+                    grid[idx] = WATER;
             } else {
                 grid[idx] = type;
             }
@@ -143,53 +153,64 @@ __global__ void paintCircleKernel(int* grid, int w, int h, int cx, int cy, int r
     }
 }
 
-__global__ void paintRectKernel(int* grid, int w, int h, int rx, int ry, int rw, int rh, int type) {
+__global__ void paintRectKernel(int* grid, int w, int h,
+                                int rx, int ry, int rw, int rh, int type) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= w*h) return;
+    if (idx >= w * h) return;
+
     int x = idx % w;
     int y = idx / w;
-    if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
+
+    if (x >= rx && x < rx + rw && y >= ry && y < ry + rh)
         grid[idx] = type;
-    }
 }
 
-// Host wrappers
+// =====================================================
+// HOST WRAPPERS (OPTIMIZED SYNC MODEL)
+// =====================================================
+
 void initGrid(int* grid, int w, int h) {
-    initGridKernel<<<(w*h+255)/256, 256>>>(grid, w, h);
+    dim3 blocks((w * h + 255) / 256);
+    dim3 threads(256);
+    initGridKernel<<<blocks, threads>>>(grid, w, h);
     cudaDeviceSynchronize();
 }
 
-void stepFluids(int* grid, int w, int h, int frame, int gravitySteps, int flowSteps) {
-    dim3 gridDim((w*h+255)/256);
-    dim3 blockDim(256);
+void stepFluids(int* grid, int w, int h,
+                int frame, int gravitySteps, int flowSteps) {
 
-    // To ensure "smoother" simulation, we can alternate small steps
-    // But to satisfy "gravity slider", we run gravity kernel N times
-    // And "flow slider", we run settle kernel N times.
-    
-    // Strict separation ensures falling particles don't disperse
-    
-    for(int g=0; g<gravitySteps; ++g) {
-        updateGravityKernel<<<gridDim, blockDim>>>(grid, w, h, frame + g);
-        cudaDeviceSynchronize();
-    }
+    dim3 blocks((w * h + 255) / 256);
+    dim3 threads(256);
 
-    for(int f=0; f<flowSteps; ++f) {
-        updateSettleKernel<<<gridDim, blockDim>>>(grid, w, h, frame + f);
-        cudaDeviceSynchronize();
-    }
+    // ✅ NO PER-ITERATION SYNCS
+    for (int g = 0; g < gravitySteps; ++g)
+        updateGravityKernel<<<blocks, threads>>>(grid, w, h, frame + g);
+
+    for (int f = 0; f < flowSteps; ++f)
+        updateSettleKernel<<<blocks, threads>>>(grid, w, h, frame + f);
+
+    // ✅ ONE SYNC PER FRAME
+    cudaDeviceSynchronize();
 }
 
 void renderFluids(int* grid, unsigned char* fb, int w, int h) {
-    renderGridKernel<<<(w*h+255)/256, 256>>>(grid, fb, w, h);
+    dim3 blocks((w * h + 255) / 256);
+    dim3 threads(256);
+    renderGridKernel<<<blocks, threads>>>(grid, fb, w, h);
 }
 
-void paintCircle(int* grid, int w, int h, int cx, int cy, int r, int type) {
-    paintCircleKernel<<<(w*h+255)/256, 256>>>(grid, w, h, cx, cy, r, type);
+void paintCircle(int* grid, int w, int h,
+                 int cx, int cy, int r, int type) {
+    dim3 blocks((w * h + 255) / 256);
+    dim3 threads(256);
+    paintCircleKernel<<<blocks, threads>>>(grid, w, h, cx, cy, r, type);
 }
 
-void paintRect(int* grid, int w, int h, int rx, int ry, int rw, int rh, int type) {
-    paintRectKernel<<<(w*h+255)/256, 256>>>(grid, w, h, rx, ry, rw, rh, type);
+void paintRect(int* grid, int w, int h,
+               int rx, int ry, int rw, int rh, int type) {
+    dim3 blocks((w * h + 255) / 256);
+    dim3 threads(256);
+    paintRectKernel<<<blocks, threads>>>(grid, w, h, rx, ry, rw, rh, type);
 }
 
-}
+} // extern "C"

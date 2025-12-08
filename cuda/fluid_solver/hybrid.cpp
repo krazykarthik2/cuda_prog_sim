@@ -47,8 +47,8 @@ struct UIState {
     int stepsPerFrame = 1;
     
     // New parameters 
-    int gravitySteps = 1;
-    int flowSteps = 8;
+    int gravitySteps = 4; // Faster fall by default
+    int flowSteps = 250;   // Much faster leveling (very low viscosity)
     
     // For drag shapes
     bool isDragging = false;
@@ -232,8 +232,8 @@ int main(){
 
         // --- Sliders ---
         DrawControl(bx, by, "BRUSH SIZE", &ui.brushSize, 1, 100); by += gap + 20;
-        DrawControl(bx, by, "GRAVITY STEPS", &ui.gravitySteps, 1, 10); by += gap + 20;
-        DrawControl(bx, by, "FLOW STEPS", &ui.flowSteps, 1, 50); by += gap + 20;
+        DrawControl(bx, by, "GRAVITY STEPS", &ui.gravitySteps, 1, 20); by += gap + 20;
+        DrawControl(bx, by, "FLOW STEPS", &ui.flowSteps, 1, 300); by += gap + 20;
         DrawControl(bx, by, "SIM SPEED", &ui.stepsPerFrame, 1, 20); by += gap + 20;
 
 
