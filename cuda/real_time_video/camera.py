@@ -8,7 +8,7 @@ EXE_PATH = "raylib_cuda.exe"
 # Target Resolution (Must match C++ VID_W/VID_H)
 WIDTH = 1280
 HEIGHT = 720
-FPS_TARGET = 60
+FPS_TARGET = 120
 
 def main():
     # 1. Open Video

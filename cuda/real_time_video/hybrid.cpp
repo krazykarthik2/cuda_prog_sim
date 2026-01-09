@@ -19,7 +19,7 @@ const int VID_W = 1280;
 const int VID_H = 720;
 
 // Terminal Output Dimensions (Downsampled)
-#define SCALE .1
+#define SCALE (0.3f) //now increase resolution to 3x 
 const int TERM_W = (int)(VID_W * SCALE);
 const int TERM_H = (int)(VID_H * SCALE);
 

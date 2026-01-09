@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 
+#define BOIDS_COUNT 32768 //let us try to use more boids
 #include <cuda_runtime.h>
 #include "raylib.h"
 #include <iostream>
@@ -24,9 +25,9 @@ int main(){
     const int W=1280, H=720;
     InitWindow(W,H,"CUDA 3D Boids (GPU-rendered)");
 
-    SetTargetFPS(60);
+    SetTargetFPS(120);
 
-    int n = 1024*32;
+    int n = (BOIDS_COUNT);
     float box = 20.f;
     float boidSize = 3.f;
 
@@ -109,6 +110,8 @@ int main(){
         BeginDrawing();
         ClearBackground(BLACK);
         DrawTexture(tex,0,0,WHITE);
+
+        DrawText(TextFormat("FPS: %d", GetFPS()), W - 100, 10, 20, WHITE);
 
         DrawText(TextFormat("Mouse = attractor(%.2f, %.2f)", (mx-0.5f)*box*2, (0.5f-my)*box*2),10,10,20,WHITE);
         DrawText(TextFormat("BoidSize: %.1f (mouse wheel)",boidSize),10,40,20,WHITE);
